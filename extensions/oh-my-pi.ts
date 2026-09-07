@@ -164,7 +164,7 @@ function checkRegistration(pi: ExtensionAPI): DoctorCheck[] {
     : { severity: "warn", label: "remote-devices tools missing", detail: missingRemoteTools.join(", ") });
 
   // serial-devices extension check
-  const expectedSerialTools = ["serial_exec"];
+  const expectedSerialTools = ["serial_exec", "serial_read"];
   const missingSerialTools = expectedSerialTools.filter((name) => !toolNames.has(name));
   checks.push(missingSerialTools.length === 0
     ? { severity: "pass", label: "serial-devices tools registered" }

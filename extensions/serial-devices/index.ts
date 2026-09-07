@@ -401,12 +401,65 @@ function formatExecResult(result: SerialExecResult): string {
 }
 
 // ---------------------------------------------------------------------------
+// Orca split integration
+// ---------------------------------------------------------------------------
+
+/** Track which ports have already been split in Orca. */
+const orcaSplitDone = new Set<string>();
+
+/** Resolve the orca CLI executable for the current environment. */
+function orcaCliCommand(): string {
+  return process.env.ORCA_CLI_COMMAND || "orca-ide";
+}
+
+/**
+ * On first serial operation for a port, split an Orca terminal to show
+ * the tmux session in real time. Gracefully no-ops if Orca is unavailable.
+ */
+async function maybeOrcaSplit(port: string): Promise<void> {
+  if (orcaSplitDone.has(port)) return;
+  orcaSplitDone.add(port);
+
+  const orcaCli = orcaCliCommand();
+  const tmuxSession = sessionName(port);
+  const attachCmd = `tmux attach -t ${tmuxSession}`;
+
+  try {
+    // Check if Orca is available
+    const status = await runLocal(orcaCli, ["status", "--json"], 5000);
+    if (status.exitCode !== 0) return; // Orca not running, skip silently
+
+    // Get current terminal handle for split target
+    const termList = await runLocal(orcaCli, ["terminal", "read", "--json"], 5000);
+    if (termList.exitCode !== 0) return;
+
+    let handle: string | undefined;
+    try {
+      const parsed = JSON.parse(termList.stdout);
+      handle = parsed?.terminal?.handle;
+    } catch { /* ignore parse failure */ }
+    if (!handle) return;
+
+    // Split terminal vertically with tmux attach command
+    await runLocal(orcaCli, [
+      "terminal", "split",
+      "--terminal", handle,
+      "--direction", "vertical",
+      "--command", attachCmd,
+      "--json",
+    ], 10000);
+  } catch {
+    // Orca unavailable or split failed — not critical, skip silently
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Extension registration
 // ---------------------------------------------------------------------------
 
 export default function serialDevicesExtension(pi: ExtensionAPI) {
   pi.on("system_prompt", (event => {
-    event.systemPrompt = `${event.systemPrompt}\n\n[serial-devices]\nSerial device extension loaded. Use serial_exec to run commands on a serial-connected device (e.g. development board) via tmux shared terminal. Default port: /dev/ttyUSB0, default baud: 115200. The tmux session is named "pi-serial-<port>" and users can \`tmux attach -t pi-serial-<port>\` to observe and interact in real time. For destructive commands, only set allowDangerous=true after the user clearly authorized that exact action.`;
+    event.systemPrompt = `${event.systemPrompt}\n\n[serial-devices]\nSerial device extension loaded. Use serial_exec to run commands on a serial-connected device (e.g. development board) via tmux shared terminal. Use serial_read to read the current serial terminal screen content. Default port: /dev/ttyUSB0, default baud: 115200. The tmux session is named "pi-serial-<port>" and users can \`tmux attach -t pi-serial-<port>\` to observe and interact in real time. For destructive commands, only set allowDangerous=true after the user clearly authorized that exact action.`;
   }));
 
   pi.on("session_start", async (_event, ctx) => {
@@ -446,6 +499,7 @@ export default function serialDevicesExtension(pi: ExtensionAPI) {
         baud: params.baud,
       };
       const result = await execCommand(config, command, params.timeout_seconds);
+      await maybeOrcaSplit(config.port || DEFAULT_PORT);
       const text = formatExecResult(result);
 
       return {
@@ -460,6 +514,40 @@ export default function serialDevicesExtension(pi: ExtensionAPI) {
           stdoutChars: result.stdout.length,
         },
         isError: result.exitCode !== 0 || result.timedOut,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "serial_read",
+    label: "Serial Devices: Read",
+    description: "读取当前串口终端屏幕内容。基于 tmux capture-pane，返回当前可见内容和 scrollback。",
+    promptSnippet: "读取当前串口终端屏幕内容",
+    promptGuidelines: [
+      "Use serial_read to see what is currently on the serial terminal screen, including user interactions.",
+      "serial_read does not send any command; it only captures the current pane content.",
+      "Use serial_read to check the device state or see what the user did manually.",
+    ],
+    parameters: Type.Object({
+      port: Type.Optional(Type.String({ description: "串口设备路径，默认 /dev/ttyUSB0" })),
+      baud: Type.Optional(Type.Number({ description: "波特率，默认 115200（用于首次创建 session）" })),
+      lines: Type.Optional(Type.Number({ description: "捕获行数，默认 50" })),
+    }),
+    async execute(_toolCallId, params: any) {
+      const config = resolveConfig({ port: params.port, baud: params.baud });
+      await ensureSession(config);
+      await maybeOrcaSplit(config.port);
+      const lines = Math.min(Math.max(1, params.lines ?? 50), CAPTURE_SCROLLBACK_LINES);
+      const content = await capturePane(config.port, lines);
+      const trimmed = content.trim();
+
+      return {
+        content: [{ type: "text" as const, text: trimmed || "[串口屏幕无内容]" }],
+        details: {
+          port: config.port,
+          lines,
+          capturedChars: trimmed.length,
+        },
       };
     },
   });
