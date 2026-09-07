@@ -409,7 +409,9 @@ const orcaSplitDone = new Set<string>();
 
 /** Resolve the orca CLI executable for the current environment. */
 function orcaCliCommand(): string {
-  return process.env.ORCA_CLI_COMMAND || "orca-ide";
+  if (process.env.ORCA_CLI_COMMAND) return process.env.ORCA_CLI_COMMAND;
+  if (process.env.ORCA_DEV_REPO_ROOT) return "orca-dev";
+  return "orca-ide";
 }
 
 /**
@@ -418,7 +420,6 @@ function orcaCliCommand(): string {
  */
 async function maybeOrcaSplit(port: string): Promise<void> {
   if (orcaSplitDone.has(port)) return;
-  orcaSplitDone.add(port);
 
   const orcaCli = orcaCliCommand();
   const tmuxSession = sessionName(port);
@@ -441,13 +442,18 @@ async function maybeOrcaSplit(port: string): Promise<void> {
     if (!handle) return;
 
     // Split terminal vertically with tmux attach command
-    await runLocal(orcaCli, [
+    const splitResult = await runLocal(orcaCli, [
       "terminal", "split",
       "--terminal", handle,
       "--direction", "vertical",
       "--command", attachCmd,
       "--json",
     ], 10000);
+
+    // Only mark as done if split succeeded
+    if (splitResult.exitCode === 0) {
+      orcaSplitDone.add(port);
+    }
   } catch {
     // Orca unavailable or split failed — not critical, skip silently
   }
@@ -498,8 +504,10 @@ export default function serialDevicesExtension(pi: ExtensionAPI) {
         port: params.port,
         baud: params.baud,
       };
+      const resolved = resolveConfig(config);
+      await ensureSession(resolved);
+      await maybeOrcaSplit(resolved.port);
       const result = await execCommand(config, command, params.timeout_seconds);
-      await maybeOrcaSplit(config.port || DEFAULT_PORT);
       const text = formatExecResult(result);
 
       return {
@@ -535,20 +543,22 @@ export default function serialDevicesExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params: any) {
       const config = resolveConfig({ port: params.port, baud: params.baud });
-      await ensureSession(config);
-      await maybeOrcaSplit(config.port);
-      const lines = Math.min(Math.max(1, params.lines ?? 50), CAPTURE_SCROLLBACK_LINES);
-      const content = await capturePane(config.port, lines);
-      const trimmed = content.trim();
+      return withPortLock(config.port, async () => {
+        await ensureSession(config);
+        await maybeOrcaSplit(config.port);
+        const lines = Math.floor(Math.min(Math.max(1, params.lines ?? 50), CAPTURE_SCROLLBACK_LINES));
+        const content = await capturePane(config.port, lines);
+        const trimmed = content.trim();
 
-      return {
-        content: [{ type: "text" as const, text: trimmed || "[串口屏幕无内容]" }],
-        details: {
-          port: config.port,
-          lines,
-          capturedChars: trimmed.length,
-        },
-      };
+        return {
+          content: [{ type: "text" as const, text: trimmed || "[串口屏幕无内容]" }],
+          details: {
+            port: config.port,
+            lines,
+            capturedChars: trimmed.length,
+          },
+        };
+      });
     },
   });
 }
