@@ -271,7 +271,7 @@ export async function execCommand(config: SerialSessionConfig, command: string, 
   return withPortLock(resolved.port, async () => {
     const nonce = generateNonce();
     const marker = `${MARKER_PREFIX}${nonce}_`;
-    const markerEcho = `echo ${marker}'$?'__`;
+    const markerEcho = `echo ${marker}\$?__`;
 
     await ensureSession(resolved);
 
