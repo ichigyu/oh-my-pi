@@ -14,7 +14,8 @@
 
 import { spawn } from "node:child_process";
 import * as crypto from "node:crypto";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -369,14 +370,97 @@ function sleep(ms: number): Promise<void> {
 // Extension registration
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Dangerous command guard (reused from remote-devices)
+// ---------------------------------------------------------------------------
+
+function dangerousReason(command: string): string | undefined {
+  const patterns: Array<[RegExp, string]> = [
+    [/\brm\s+(-[^\n]*[rf]|-[^\n]*r|-[^\n]*f)[^\n]*(\/|~|\*)/i, "rm 递归/强制删除"],
+    [/\b(dd|mkfs|parted|fdisk|wipefs)\b/i, "磁盘/分区破坏性操作"],
+    [/\b(reboot|shutdown|poweroff|halt)\b/i, "重启或关机"],
+    [/\bchmod\s+-R\b/i, "递归 chmod"],
+    [/\bchown\s+-R\b/i, "递归 chown"],
+    [/\biptables\b|\bufw\b|\bnft\b/i, "防火墙变更"],
+    [/\/etc\/ssh\/sshd_config|\bsystemctl\s+restart\s+ssh/i, "SSH 配置变更"],
+    [/\b(drop\s+database|drop\s+table|truncate\s+table)\b/i, "数据库删除/截断操作"],
+  ];
+  return patterns.find(([re]) => re.test(command))?.[1];
+}
+
+// ---------------------------------------------------------------------------
+// Result formatting
+// ---------------------------------------------------------------------------
+
+function formatExecResult(result: SerialExecResult): string {
+  const parts: string[] = [];
+  if (result.stdout) parts.push(result.stdout);
+  if (result.timedOut) parts.push(`\n[超时 ${Math.round(result.durationMs / 1000)}s]`);
+  parts.push(`\n[exit=${result.exitCode} duration=${result.durationMs}ms]`);
+  return parts.join("");
+}
+
+// ---------------------------------------------------------------------------
+// Extension registration
+// ---------------------------------------------------------------------------
+
 export default function serialDevicesExtension(pi: ExtensionAPI) {
-  // Note: system_prompt injection for serial_exec/serial_read will be added
-  // when those tools are registered in a future slice (#143, #144).
-  // This slice only provides the core tmux management API.
+  pi.on("system_prompt", (event => {
+    event.systemPrompt = `${event.systemPrompt}\n\n[serial-devices]\nSerial device extension loaded. Use serial_exec to run commands on a serial-connected device (e.g. development board) via tmux shared terminal. Default port: /dev/ttyUSB0, default baud: 115200. The tmux session is named "pi-serial-<port>" and users can \`tmux attach -t pi-serial-<port>\` to observe and interact in real time. For destructive commands, only set allowDangerous=true after the user clearly authorized that exact action.`;
+  }));
 
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.hasUI) {
-      ctx.ui.notify("✓ serial-devices 核心已加载（tool 将在后续 slice 注册）", "info");
+      ctx.ui.notify("✓ serial-devices 已加载", "info");
     }
+  });
+
+  pi.registerTool({
+    name: "serial_exec",
+    label: "Serial Devices: Exec",
+    description: "通过串口在开发板上执行命令。基于 tmux + picocom 共享终端，用户可同时 attach 观看/交互。",
+    promptSnippet: "通过串口在开发板上执行命令",
+    promptGuidelines: [
+      "Use serial_exec to run commands on a serial-connected device (development board, router, embedded system).",
+      "Default port /dev/ttyUSB0, default baud 115200 8N1. Override with port/baud parameters if needed.",
+      "The tmux session persists; users can attach with `tmux attach -t pi-serial-<port>` to see all operations in real time.",
+      "For destructive commands (reboot, rm -rf, dd, mkfs, etc.), only set allowDangerous=true after the user clearly authorized that exact action.",
+      "Estimate timeout_seconds from the command's expected runtime; default is 30s.",
+    ],
+    parameters: Type.Object({
+      command: Type.String({ description: "要在串口设备上执行的 shell 命令" }),
+      port: Type.Optional(Type.String({ description: "串口设备路径，默认 /dev/ttyUSB0" })),
+      baud: Type.Optional(Type.Number({ description: "波特率，默认 115200" })),
+      timeout_seconds: Type.Optional(Type.Number({ description: "命令超时秒数，默认 30，最大 600" })),
+      allowDangerous: Type.Optional(Type.Boolean({ description: "仅在用户明确授权破坏性操作时设为 true" })),
+    }),
+    async execute(_toolCallId, params: any, _signal, _onUpdate, _ctx: ExtensionContext) {
+      const command: string = params.command;
+      const reason = dangerousReason(command);
+      if (reason && !params.allowDangerous) {
+        throw new Error(`serial_exec 拒绝执行疑似危险命令：${reason}。只有在用户明确授权后才可设置 allowDangerous=true。`);
+      }
+
+      const config: SerialSessionConfig = {
+        port: params.port,
+        baud: params.baud,
+      };
+      const result = await execCommand(config, command, params.timeout_seconds);
+      const text = formatExecResult(result);
+
+      return {
+        content: [{ type: "text" as const, text }],
+        details: {
+          port: params.port || DEFAULT_PORT,
+          baud: params.baud || DEFAULT_BAUD,
+          command,
+          exitCode: result.exitCode,
+          timedOut: result.timedOut,
+          durationMs: result.durationMs,
+          stdoutChars: result.stdout.length,
+        },
+        isError: result.exitCode !== 0 || result.timedOut,
+      };
+    },
   });
 }
