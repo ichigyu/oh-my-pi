@@ -528,8 +528,9 @@ const EXTERNAL_DEPS: ExternalDep[] = [
   { cmd: "picocom", args: ["--help"], label: "picocom", purpose: "serial-devices 串口连接", severity: "warn" },
   {
     cmd: "gh", args: ["auth", "status"], label: "gh CLI", purpose: "github-workflow PR/issue 操作", severity: "warn",
-    versionCheck: (_stdout, stderr) => {
-      if (stderr.includes("Logged in") || stderr.includes("Active account")) {
+    versionCheck: (stdout, stderr) => {
+      const combined = `${stdout} ${stderr}`;
+      if (combined.includes("Logged in") || combined.includes("Active account")) {
         return { severity: "pass", label: "gh CLI 已认证", detail: "github-workflow" };
       }
       return { severity: "warn", label: "gh CLI 未认证", detail: "github-workflow：运行 gh auth login" };
