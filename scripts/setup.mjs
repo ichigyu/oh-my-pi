@@ -37,6 +37,41 @@ async function enableRtk() {
   }
 }
 
+const larkSkills = ["lark-doc", "lark-drive", "lark-wiki", "lark-shared"];
+
+async function enableLarkCli() {
+  if (process.env.OH_MY_PI_SKIP_LARK === "1") {
+    console.log("Skipped lark-cli setup because OH_MY_PI_SKIP_LARK=1.");
+    return "skipped";
+  }
+
+  // Step 1: Install @larksuite/cli globally
+  try {
+    await execFileAsync("npm", ["install", "-g", "@larksuite/cli"], { timeout: 120_000 });
+    console.log("npm install -g @larksuite/cli completed.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`lark-cli install failed; continuing setup. ${message}`);
+    return false;
+  }
+
+  // Step 2: Install selected skills globally
+  try {
+    await execFileAsync(
+      "npx",
+      ["skills", "add", "larksuite/cli", "-s", ...larkSkills, "-y", "-g"],
+      { timeout: 120_000 },
+    );
+    console.log(`lark-cli skills installed: ${larkSkills.join(", ")}.`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`lark-cli skills install failed; continuing setup. ${message}`);
+    return false;
+  }
+
+  return true;
+}
+
 async function main() {
   const settings = await readSettings(globalSettings);
   const packages = getPackageEntries(settings);
@@ -64,6 +99,13 @@ async function main() {
   if (!rtkEnabled) {
     console.log("Install rtk when ready, then run /oh-my-pi rtk inside pi to initialize it manually.");
   }
+
+  const larkResult = await enableLarkCli();
+  if (larkResult === false) {
+    console.log("Install lark-cli manually: npm install -g @larksuite/cli");
+    console.log(`Then install skills: npx skills add larksuite/cli -s ${larkSkills.join(" ")} -y -g`);
+  }
+
   console.log("Done. Restart pi or run /reload.");
 }
 
