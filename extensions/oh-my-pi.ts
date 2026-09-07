@@ -497,6 +497,87 @@ function checkSkillFrontmatter(root: string): DoctorCheck {
   return { severity: "fail", label: "skill frontmatter invalid", detail: failures.join(", ") };
 }
 
+// ---------------------------------------------------------------------------
+// External dependency checks
+// ---------------------------------------------------------------------------
+
+type ExternalDep = {
+  cmd: string;
+  args?: string[];
+  label: string;
+  purpose: string;
+  severity: DoctorSeverity;
+  versionCheck?: (stdout: string, stderr: string) => DoctorCheck | null;
+};
+
+const EXTERNAL_DEPS: ExternalDep[] = [
+  // fail-level: essential
+  { cmd: "git", args: ["--version"], label: "git", purpose: "基础 VCS", severity: "fail" },
+  { cmd: "ssh", args: ["-V"], label: "ssh", purpose: "remote-devices SSH 连接", severity: "fail" },
+  {
+    cmd: "node", args: ["-v"], label: "Node.js", purpose: "pi 运行时", severity: "fail",
+    versionCheck: (stdout) => {
+      const match = stdout.trim().match(/^v(\d+)/);
+      const major = match ? parseInt(match[1], 10) : 0;
+      if (major >= 22) return { severity: "pass", label: `Node.js ${stdout.trim()}`, detail: "pi 运行时" };
+      return { severity: "fail", label: `Node.js ${stdout.trim()} < 22`, detail: "pi 需要 Node.js >= 22" };
+    },
+  },
+  // warn-level: optional per feature
+  { cmd: "tmux", args: ["-V"], label: "tmux", purpose: "serial-devices 共享终端", severity: "warn" },
+  { cmd: "picocom", args: ["--help"], label: "picocom", purpose: "serial-devices 串口连接", severity: "warn" },
+  {
+    cmd: "gh", args: ["auth", "status"], label: "gh CLI", purpose: "github-workflow PR/issue 操作", severity: "warn",
+    versionCheck: (stdout, stderr) => {
+      const combined = `${stdout} ${stderr}`;
+      if (combined.includes("Logged in") || combined.includes("Active account")) {
+        return { severity: "pass", label: "gh CLI 已认证", detail: "github-workflow" };
+      }
+      return { severity: "warn", label: "gh CLI 未认证", detail: "github-workflow：运行 gh auth login" };
+    },
+  },
+  { cmd: "usbip", args: ["version"], label: "usbip", purpose: "WSL2 USB 串口映射", severity: "warn" },
+  { cmd: "lark-cli", args: ["--version"], label: "lark-cli", purpose: "飞书云文档 skill", severity: "warn" },
+];
+
+async function checkExternalDeps(pi: ExtensionAPI): Promise<DoctorCheck[]> {
+  const checks: DoctorCheck[] = [];
+  const TIMEOUT_MS = 3000;
+
+  for (const dep of EXTERNAL_DEPS) {
+    try {
+      const result = await pi.exec(dep.cmd, dep.args ?? [], { timeout: TIMEOUT_MS });
+      if (dep.versionCheck) {
+        const custom = dep.versionCheck(result.stdout || "", result.stderr || "");
+        if (custom) { checks.push(custom); continue; }
+      }
+      if (result.code === 0 || (dep.cmd === "ssh" && result.code !== 127)) {
+        const version = (result.stdout || result.stderr || "").trim().split("\n")[0];
+        checks.push({ severity: "pass", label: `${dep.label} 可用`, detail: version ? truncateDetail(version, 60) : dep.purpose });
+      } else {
+        checks.push({ severity: dep.severity, label: `${dep.label} 不可用`, detail: dep.purpose });
+      }
+    } catch {
+      checks.push({ severity: dep.severity, label: `${dep.label} 不可用`, detail: dep.purpose });
+    }
+  }
+
+  // Orca CLI: resolve executable like serial-devices does
+  const orcaCli = process.env.ORCA_CLI_COMMAND || (process.env.ORCA_DEV_REPO_ROOT ? "orca-dev" : "orca-ide");
+  try {
+    const result = await pi.exec(orcaCli, ["status", "--json"], { timeout: TIMEOUT_MS });
+    checks.push(result.code === 0
+      ? { severity: "pass", label: "Orca CLI 可用", detail: `${orcaCli}：Orca 分屏/worktree` }
+      : { severity: "warn", label: "Orca CLI 不可用", detail: `${orcaCli}：Orca 分屏/worktree` });
+  } catch {
+    checks.push({ severity: "warn", label: "Orca CLI 不可用", detail: `${orcaCli}：Orca 分屏/worktree` });
+  }
+
+  // RTK is already checked by checkRtkHealth, skip here
+
+  return checks;
+}
+
 function overallSeverity(checks: DoctorCheck[]): DoctorSeverity {
   if (checks.some((check) => check.severity === "fail")) return "fail";
   if (checks.some((check) => check.severity === "warn")) return "warn";
@@ -539,6 +620,7 @@ async function runDoctor(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
     checkPiEmptyCommentsPatch(),
     checkSensitiveContent(root),
     checkSkillFrontmatter(root),
+    ...(await checkExternalDeps(pi)),
   ];
   const status = overallSeverity(checks);
   ctx.ui.notify(formatDoctorReport(checks), status === "fail" ? "error" : status === "warn" ? "warning" : "info");
