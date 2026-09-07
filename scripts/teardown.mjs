@@ -42,16 +42,18 @@ async function main() {
   await writeSettings(globalSettings, settings);
 
   // Remove lark-cli skills
-  try {
-    await execFileAsync(
-      "npx",
-      ["skills", "remove", ...larkSkills, "-y", "-g"],
-      { timeout: 60_000 },
-    );
-    console.log(`lark-cli skills removed: ${larkSkills.join(", ")}.`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.log(`lark-cli skills removal skipped or failed. ${message}`);
+  if (process.env.OH_MY_PI_SKIP_LARK !== "1") {
+    try {
+      await execFileAsync(
+        "npx",
+        ["skills", "remove", ...larkSkills, "-y", "-g"],
+        { timeout: 60_000 },
+      );
+      console.log(`lark-cli skills removed: ${larkSkills.join(", ")}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.log(`lark-cli skills removal skipped or failed. ${message}`);
+    }
   }
 
   console.log("Done. Restart pi or run /reload.");

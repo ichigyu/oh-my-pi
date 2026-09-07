@@ -42,7 +42,7 @@ const larkSkills = ["lark-doc", "lark-drive", "lark-wiki", "lark-shared"];
 async function enableLarkCli() {
   if (process.env.OH_MY_PI_SKIP_LARK === "1") {
     console.log("Skipped lark-cli setup because OH_MY_PI_SKIP_LARK=1.");
-    return false;
+    return "skipped";
   }
 
   // Step 1: Install @larksuite/cli globally
@@ -100,8 +100,8 @@ async function main() {
     console.log("Install rtk when ready, then run /oh-my-pi rtk inside pi to initialize it manually.");
   }
 
-  const larkEnabled = await enableLarkCli();
-  if (!larkEnabled) {
+  const larkResult = await enableLarkCli();
+  if (larkResult === false) {
     console.log("Install lark-cli manually: npm install -g @larksuite/cli");
     console.log(`Then install skills: npx skills add larksuite/cli -s ${larkSkills.join(" ")} -y -g`);
   }
