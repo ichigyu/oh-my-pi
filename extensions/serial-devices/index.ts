@@ -31,11 +31,20 @@ const PICOCOM_READY_TIMEOUT_MS = 5000;
 const PICOCOM_READY_POLL_MS = 200;
 const CAPTURE_SCROLLBACK_LINES = 2000;
 
+/** Allowed device path pattern: /dev/ followed by alphanumeric, dash, underscore, dot, slash. */
+const VALID_PORT_RE = /^\/dev\/[a-zA-Z0-9._\-/]+$/;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export type SerialSessionConfig = {
+  port?: string;
+  baud?: number;
+};
+
+/** Resolved config with defaults applied. */
+type ResolvedConfig = {
   port: string;
   baud: number;
 };
@@ -46,6 +55,44 @@ export type SerialExecResult = {
   durationMs: number;
   timedOut: boolean;
 };
+
+// ---------------------------------------------------------------------------
+// Config resolution and validation
+// ---------------------------------------------------------------------------
+
+function resolveConfig(config: SerialSessionConfig): ResolvedConfig {
+  const port = config.port || DEFAULT_PORT;
+  const baud = config.baud ?? DEFAULT_BAUD;
+  if (!VALID_PORT_RE.test(port)) {
+    throw new Error(`串口路径不合法: "${port}"。仅允许 /dev/ 下的标准设备路径。`);
+  }
+  if (!Number.isFinite(baud) || baud <= 0) {
+    throw new Error(`波特率不合法: ${baud}`);
+  }
+  return { port, baud };
+}
+
+// ---------------------------------------------------------------------------
+// Per-port mutex for serializing operations
+// ---------------------------------------------------------------------------
+
+const portLocks = new Map<string, Promise<void>>();
+
+async function withPortLock<T>(port: string, fn: () => Promise<T>): Promise<T> {
+  // Chain onto existing lock for this port
+  const prev = portLocks.get(port) ?? Promise.resolve();
+  let releaseLock: () => void;
+  const next = new Promise<void>((resolve) => { releaseLock = resolve; });
+  portLocks.set(port, next);
+  try {
+    await prev;
+    return await fn();
+  } finally {
+    releaseLock!();
+    // Clean up if we're the last in the chain
+    if (portLocks.get(port) === next) portLocks.delete(port);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers: run a local command and capture output
@@ -75,6 +122,14 @@ function runLocal(command: string, args: string[], timeoutMs?: number): Promise<
 }
 
 // ---------------------------------------------------------------------------
+// Shell quoting
+// ---------------------------------------------------------------------------
+
+function shellQuote(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+// ---------------------------------------------------------------------------
 // Session name helper
 // ---------------------------------------------------------------------------
 
@@ -97,14 +152,16 @@ export async function sessionExists(port: string): Promise<boolean> {
 
 /** Create a new tmux session running picocom. Returns true on success. */
 export async function createSession(config: SerialSessionConfig): Promise<boolean> {
-  const name = sessionName(config.port);
+  const resolved = resolveConfig(config);
+  const name = sessionName(resolved.port);
 
   // Kill leftover session if any
-  if (await sessionExists(config.port)) {
+  if (await sessionExists(resolved.port)) {
     await runLocal("tmux", ["kill-session", "-t", name], 5000);
   }
 
-  const picocomCmd = `picocom ${config.port} -b ${config.baud}`;
+  // Use shell-quoted arguments to prevent injection
+  const picocomCmd = `picocom ${shellQuote(resolved.port)} -b ${resolved.baud}`;
   const result = await runLocal("tmux", [
     "new-session", "-d", "-s", name,
     "-x", "200", "-y", "50",
@@ -118,7 +175,7 @@ export async function createSession(config: SerialSessionConfig): Promise<boolea
   // Wait for picocom to become ready (check pane content for "Terminal ready" or prompt)
   const deadline = Date.now() + PICOCOM_READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const pane = await capturePane(config.port, 20);
+    const pane = await capturePane(resolved.port, 20);
     if (pane.includes("Terminal ready") || pane.includes("picocom")) {
       return true;
     }
@@ -130,9 +187,10 @@ export async function createSession(config: SerialSessionConfig): Promise<boolea
 
 /** Ensure a session exists, creating if needed. */
 export async function ensureSession(config: SerialSessionConfig): Promise<void> {
-  if (await sessionExists(config.port)) {
+  const resolved = resolveConfig(config);
+  if (await sessionExists(resolved.port)) {
     // Verify picocom is still running inside the session
-    const name = sessionName(config.port);
+    const name = sessionName(resolved.port);
     const check = await runLocal("tmux", [
       "list-panes", "-t", name, "-F", "#{pane_current_command}",
     ], 5000);
@@ -142,7 +200,7 @@ export async function ensureSession(config: SerialSessionConfig): Promise<void> 
     // picocom died — recreate
     await runLocal("tmux", ["kill-session", "-t", name], 5000);
   }
-  await createSession(config);
+  await createSession(resolved);
 }
 
 // ---------------------------------------------------------------------------
@@ -173,16 +231,18 @@ async function sendKeys(port: string, text: string): Promise<void> {
   }
 }
 
+/** Send Ctrl+C to the tmux session to interrupt current command. */
+async function sendInterrupt(port: string): Promise<void> {
+  const name = sessionName(port);
+  await runLocal("tmux", ["send-keys", "-t", name, "C-c", ""], 5000);
+}
+
 // ---------------------------------------------------------------------------
 // Marker-based command execution
 // ---------------------------------------------------------------------------
 
 function generateNonce(): string {
   return crypto.randomBytes(6).toString("hex");
-}
-
-function buildMarkerPattern(nonce: string): string {
-  return `${MARKER_PREFIX}${nonce}_`;
 }
 
 function parseMarkerLine(line: string, nonce: string): { exitCode: number } | null {
@@ -200,83 +260,84 @@ function parseMarkerLine(line: string, nonce: string): { exitCode: number } | nu
  *
  * Sends: <command> ; echo __PI_SERIAL_DONE_<nonce>_$?__
  * Polls capture-pane until the marker appears, then extracts output and exit code.
+ *
+ * Operations on the same port are serialized via a per-port mutex.
  */
 export async function execCommand(config: SerialSessionConfig, command: string, timeoutSeconds?: number): Promise<SerialExecResult> {
+  const resolved = resolveConfig(config);
   const timeout = Math.min(Math.max(1, timeoutSeconds ?? DEFAULT_TIMEOUT_S), MAX_TIMEOUT_S);
-  const nonce = generateNonce();
-  const marker = `${MARKER_PREFIX}${nonce}_`;
-  const markerEcho = `echo ${marker}'$?'__`;
 
-  await ensureSession(config);
+  return withPortLock(resolved.port, async () => {
+    const nonce = generateNonce();
+    const marker = `${MARKER_PREFIX}${nonce}_`;
+    const markerEcho = `echo ${marker}'$?'__`;
 
-  // Capture baseline so we can isolate new output
-  const baseline = await capturePane(config.port);
-  const baselineLineCount = baseline.split("\n").length;
+    await ensureSession(resolved);
 
-  // Send command with marker
-  const fullCommand = `${command} ; ${markerEcho}`;
-  await sendKeys(config.port, fullCommand);
+    // Send command with marker
+    const fullCommand = `${command} ; ${markerEcho}`;
+    await sendKeys(resolved.port, fullCommand);
 
-  // Poll for marker
-  const startTime = Date.now();
-  const deadlineMs = startTime + timeout * 1000;
+    // Poll for marker
+    const startTime = Date.now();
+    const deadlineMs = startTime + timeout * 1000;
 
-  while (Date.now() < deadlineMs) {
-    await sleep(POLL_INTERVAL_MS);
+    while (Date.now() < deadlineMs) {
+      await sleep(POLL_INTERVAL_MS);
 
-    const pane = await capturePane(config.port);
-    const lines = pane.split("\n");
+      const pane = await capturePane(resolved.port);
+      const lines = pane.split("\n");
 
-    // Search for marker line
-    for (let i = 0; i < lines.length; i++) {
-      const parsed = parseMarkerLine(lines[i], nonce);
-      if (parsed) {
-        // Extract output: everything between the command echo and the marker line
-        const output = extractOutput(pane, fullCommand, marker, nonce);
-        return {
-          stdout: output.trim(),
-          exitCode: parsed.exitCode,
-          durationMs: Date.now() - startTime,
-          timedOut: false,
-        };
+      // Search for marker line
+      for (let i = 0; i < lines.length; i++) {
+        const parsed = parseMarkerLine(lines[i], nonce);
+        if (parsed) {
+          const output = extractOutput(pane, marker, nonce);
+          return {
+            stdout: output.trim(),
+            exitCode: parsed.exitCode,
+            durationMs: Date.now() - startTime,
+            timedOut: false,
+          };
+        }
       }
     }
-  }
 
-  // Timeout
-  const finalPane = await capturePane(config.port);
-  const partialOutput = extractOutput(finalPane, fullCommand, marker, nonce);
-  return {
-    stdout: partialOutput.trim() || "[超时未检测到完成标记]",
-    exitCode: -1,
-    durationMs: Date.now() - startTime,
-    timedOut: true,
-  };
+    // Timeout — interrupt the running command with Ctrl+C to clean up
+    await sendInterrupt(resolved.port);
+    // Brief pause to let Ctrl+C take effect
+    await sleep(500);
+
+    const finalPane = await capturePane(resolved.port);
+    const partialOutput = extractOutput(finalPane, marker, nonce);
+    return {
+      stdout: partialOutput.trim() || "[超时未检测到完成标记]",
+      exitCode: -1,
+      durationMs: Date.now() - startTime,
+      timedOut: true,
+    };
+  });
 }
 
 /**
  * Extract command output from pane content.
- * Finds the line containing the sent command, and collects lines until the marker.
+ * Finds the parsed marker-result line as the end boundary,
+ * and the command echo line (containing `echo <marker>`) as the start boundary.
  */
-function extractOutput(pane: string, sentCommand: string, markerPrefix: string, nonce: string): string {
+function extractOutput(pane: string, markerPrefix: string, nonce: string): string {
   const lines = pane.split("\n");
   let startIdx = -1;
   let endIdx = lines.length;
 
-  // Find the line where our command was echoed (last occurrence to handle repeated commands)
+  // Find the parsed marker-result line as the end boundary (last occurrence).
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i].includes(MARKER_PREFIX + nonce)) {
-      // This is the marker line — set end
+    if (parseMarkerLine(lines[i], nonce)) {
       endIdx = i;
-    }
-    // The command echo line contains both the user command and the marker echo
-    if (lines[i].includes(markerPrefix) && startIdx === -1 && i < endIdx) {
-      // This might be the echo of our full command; skip it
-      continue;
+      break;
     }
   }
 
-  // Find start: the line right after the command echo
+  // Find start: the line right after the command echo (which contains `echo <marker>`)
   for (let i = 0; i < endIdx; i++) {
     if (lines[i].includes(`echo ${markerPrefix}`)) {
       startIdx = i + 1;
@@ -287,7 +348,7 @@ function extractOutput(pane: string, sentCommand: string, markerPrefix: string, 
   if (startIdx < 0) startIdx = 0;
   if (startIdx >= endIdx) return "";
 
-  // Filter out the marker echo line and marker result line
+  // Filter out any lines containing the marker prefix (command echo remnants)
   const output = lines
     .slice(startIdx, endIdx)
     .filter(line => !line.includes(markerPrefix))
@@ -309,14 +370,13 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export default function serialDevicesExtension(pi: ExtensionAPI) {
-  // Inject serial-devices context into system prompt
-  pi.on("system_prompt", (event => {
-    event.systemPrompt = `${event.systemPrompt}\n\n[serial-devices]\nSerial device extension loaded. Use serial_exec to run commands on a serial-connected device via tmux shared terminal. The tmux session is named "pi-serial-<port>" and users can attach with \`tmux attach -t pi-serial-<port>\` to observe and interact in real time.`;
-  }));
+  // Note: system_prompt injection for serial_exec/serial_read will be added
+  // when those tools are registered in a future slice (#143, #144).
+  // This slice only provides the core tmux management API.
 
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.hasUI) {
-      ctx.ui.notify("✓ serial-devices 已加载", "info");
+      ctx.ui.notify("✓ serial-devices 核心已加载（tool 将在后续 slice 注册）", "info");
     }
   });
 }
