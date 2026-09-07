@@ -164,10 +164,11 @@ function checkRegistration(pi: ExtensionAPI): DoctorCheck[] {
     : { severity: "warn", label: "remote-devices tools missing", detail: missingRemoteTools.join(", ") });
 
   // serial-devices extension check
-  const serialExtensionLoaded = toolNames.has("serial_exec") || toolNames.has("serial_read");
-  checks.push(serialExtensionLoaded
-    ? { severity: "pass", label: "serial-devices extension loaded" }
-    : { severity: "info", label: "serial-devices extension not yet providing tools (core only)" });
+  const expectedSerialTools = ["serial_exec"];
+  const missingSerialTools = expectedSerialTools.filter((name) => !toolNames.has(name));
+  checks.push(missingSerialTools.length === 0
+    ? { severity: "pass", label: "serial-devices tools registered" }
+    : { severity: "warn", label: "serial-devices tools missing", detail: missingSerialTools.join(", ") });
 
   return checks;
 }
