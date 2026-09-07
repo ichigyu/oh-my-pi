@@ -163,6 +163,12 @@ function checkRegistration(pi: ExtensionAPI): DoctorCheck[] {
     ? { severity: "pass", label: "remote-devices tools registered" }
     : { severity: "warn", label: "remote-devices tools missing", detail: missingRemoteTools.join(", ") });
 
+  // serial-devices extension check
+  const serialExtensionLoaded = toolNames.has("serial_exec") || toolNames.has("serial_read");
+  checks.push(serialExtensionLoaded
+    ? { severity: "pass", label: "serial-devices extension loaded" }
+    : { severity: "info", label: "serial-devices extension not yet providing tools (core only)" });
+
   return checks;
 }
 
