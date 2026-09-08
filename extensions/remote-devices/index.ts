@@ -801,6 +801,76 @@ function runLocalProcess(command: string, args: string[], timeoutMs: number): Pr
   });
 }
 
+// ---------------------------------------------------------------------------
+// tmux session management for remote device output tee
+// ---------------------------------------------------------------------------
+
+const REMOTE_TMUX_PREFIX = "pi-remote-";
+const REMOTE_TMUX_SCROLLBACK = 10_000;
+
+/** Build the tmux session name for a remote device. */
+function remoteSessionName(deviceId: string): string {
+  return `${REMOTE_TMUX_PREFIX}${deviceId}`;
+}
+
+/** Check if a tmux session for the given device exists. Returns false if tmux is unavailable. */
+async function remoteSessionExists(deviceId: string): Promise<boolean> {
+  const name = remoteSessionName(deviceId);
+  try {
+    const result = await runLocalProcess("tmux", ["has-session", "-t", name], 5000);
+    return result.exitCode === 0;
+  } catch {
+    // tmux binary not found or spawn error
+    return false;
+  }
+}
+
+/**
+ * Ensure a persistent tmux session exists for the given device.
+ * Returns the session name on success, or null if tmux is unavailable or creation failed.
+ * The session runs a simple idle shell (`cat`) as an output-only receiver.
+ */
+async function ensureRemoteTmuxSession(deviceId: string): Promise<string | null> {
+  const name = remoteSessionName(deviceId);
+
+  // Check if tmux is available
+  try {
+    const whichResult = await runLocalProcess("which", ["tmux"], 5000);
+    if (whichResult.exitCode !== 0) return null;
+  } catch {
+    return null;
+  }
+
+  // Check if session already exists and is healthy
+  try {
+    const hasResult = await runLocalProcess("tmux", ["has-session", "-t", name], 5000);
+    if (hasResult.exitCode === 0) {
+      return name;
+    }
+  } catch {
+    return null;
+  }
+
+  // Create new session with large scrollback
+  try {
+    const createResult = await runLocalProcess("tmux", [
+      "new-session", "-d", "-s", name,
+      "-x", "200", "-y", "50",
+      "cat",  // idle process — output-only receiver
+    ], 10_000);
+    if (createResult.exitCode !== 0) return null;
+
+    // Set scrollback buffer
+    await runLocalProcess("tmux", [
+      "set-option", "-t", name, "history-limit", String(REMOTE_TMUX_SCROLLBACK),
+    ], 5000);
+
+    return name;
+  } catch {
+    return null;
+  }
+}
+
 async function ensureRemoteProbeBinary(): Promise<string> {
   if (!fs.existsSync(REMOTE_PROBE_SOURCE)) {
     throw new Error(`remote probe Rust 源码不存在：${REMOTE_PROBE_SOURCE}`);
