@@ -845,6 +845,10 @@ async function ensureRemoteTmuxSession(deviceId: string): Promise<string | null>
   try {
     const hasResult = await runLocalProcess("tmux", ["has-session", "-t", name], 5000);
     if (hasResult.exitCode === 0) {
+      // Ensure scrollback is applied even for pre-existing sessions
+      await runLocalProcess("tmux", [
+        "set-option", "-t", name, "history-limit", String(REMOTE_TMUX_SCROLLBACK),
+      ], 5000);
       return name;
     }
   } catch {
@@ -858,12 +862,18 @@ async function ensureRemoteTmuxSession(deviceId: string): Promise<string | null>
       "-x", "200", "-y", "50",
       "cat",  // idle process — output-only receiver
     ], 10_000);
-    if (createResult.exitCode !== 0) return null;
+    if (createResult.exitCode !== 0) {
+      // Concurrent call may have created the session — re-check
+      const existingResult = await runLocalProcess("tmux", ["has-session", "-t", name], 5000);
+      if (existingResult.exitCode === 0) return name;
+      return null;
+    }
 
-    // Set scrollback buffer
-    await runLocalProcess("tmux", [
+    // Set scrollback buffer — check result
+    const setOptionResult = await runLocalProcess("tmux", [
       "set-option", "-t", name, "history-limit", String(REMOTE_TMUX_SCROLLBACK),
     ], 5000);
+    if (setOptionResult.exitCode !== 0) return null;
 
     return name;
   } catch {
