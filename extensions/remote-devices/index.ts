@@ -881,6 +881,8 @@ async function ensureRemoteTmuxSession(deviceId: string): Promise<string | null>
   }
 }
 
+let tmuxTeeCounter = 0;
+
 /**
  * Write text to a remote-device tmux session pane.
  * Uses `tmux load-buffer` + `tmux paste-buffer` for reliable handling of
@@ -888,15 +890,19 @@ async function ensureRemoteTmuxSession(deviceId: string): Promise<string | null>
  */
 async function teeToRemoteTmux(sessionName: string, text: string): Promise<void> {
   if (!text) return;
+  const teeId = `${process.pid}-${++tmuxTeeCounter}`;
+  const tmpFile = path.join(os.tmpdir(), `pi-remote-tee-${teeId}`);
+  const bufferName = `pi-tee-${teeId}`;
   try {
-    // Write to a temp buffer file, load into tmux buffer, paste into pane
-    const tmpFile = path.join(os.tmpdir(), `pi-remote-tee-${process.pid}-${Date.now()}`);
     fs.writeFileSync(tmpFile, text, "utf8");
-    await runLocalProcess("tmux", ["load-buffer", "-b", "pi-tee", tmpFile], 3000);
-    await runLocalProcess("tmux", ["paste-buffer", "-b", "pi-tee", "-t", sessionName, "-d"], 3000);
-    try { fs.unlinkSync(tmpFile); } catch { /* ignore cleanup errors */ }
+    const loadResult = await runLocalProcess("tmux", ["load-buffer", "-b", bufferName, tmpFile], 3000);
+    if (loadResult.exitCode === 0) {
+      await runLocalProcess("tmux", ["paste-buffer", "-b", bufferName, "-t", sessionName, "-d"], 3000);
+    }
   } catch {
     // Silent degradation — tmux tee is best-effort
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore cleanup errors */ }
   }
 }
 
@@ -919,19 +925,20 @@ async function tmuxWriteFinish(sessionName: string, exitCode: number | null | un
 async function createRemoteTmuxTee(deviceId: string, toolName: string, commandSummary: string): Promise<{
   sessionName: string;
   tee: (text: string) => void;
-  finish: (exitCode: number | null | undefined, durationMs: number | undefined) => void;
+  finish: (exitCode: number | null | undefined, durationMs: number | undefined) => Promise<void>;
 } | null> {
   const sessionName = await ensureRemoteTmuxSession(deviceId);
   if (!sessionName) return null;
   await tmuxWriteSeparator(sessionName, toolName, commandSummary);
-  // Buffer tee writes to avoid overwhelming tmux with tiny chunks
+  // Serialize all tmux writes to avoid race conditions
+  let writeChain: Promise<void> = Promise.resolve();
   let pending = "";
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
-  const flush = () => {
+  const doFlush = () => {
     if (pending) {
       const text = pending;
       pending = "";
-      teeToRemoteTmux(sessionName, text);
+      writeChain = writeChain.then(() => teeToRemoteTmux(sessionName, text));
     }
     flushTimer = null;
   };
@@ -939,17 +946,18 @@ async function createRemoteTmuxTee(deviceId: string, toolName: string, commandSu
     sessionName,
     tee(text: string) {
       pending += text;
-      if (!flushTimer) flushTimer = setTimeout(flush, 50);
+      if (!flushTimer) flushTimer = setTimeout(doFlush, 50);
     },
-    finish(exitCode, durationMs) {
+    async finish(exitCode, durationMs) {
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-      // Flush remaining then write finish marker
+      // Flush remaining output, then write finish marker, all serialized
       const remaining = pending;
       pending = "";
-      (async () => {
-        if (remaining) await teeToRemoteTmux(sessionName, remaining);
-        await tmuxWriteFinish(sessionName, exitCode, durationMs);
-      })();
+      if (remaining) {
+        writeChain = writeChain.then(() => teeToRemoteTmux(sessionName, remaining));
+      }
+      writeChain = writeChain.then(() => tmuxWriteFinish(sessionName, exitCode, durationMs));
+      await writeChain;
     },
   };
 }
@@ -2330,7 +2338,7 @@ export default function (pi: ExtensionAPI) {
         onSystem: (text) => live?.system(text),
       });
       live?.finish(outcome.exitCode, outcome.timedOut, outcome.durationMs, outcome.aborted);
-      tmuxTee?.finish(outcome.exitCode, outcome.durationMs);
+      await tmuxTee?.finish(outcome.exitCode, outcome.durationMs);
       return {
         content: [{ type: "text", text: formatExecContent(outcome) }],
         details: {
@@ -2395,7 +2403,7 @@ export default function (pi: ExtensionAPI) {
         onSystem: (text) => live?.system(text),
       });
       live?.finish(outcome.exitCode, outcome.timedOut, outcome.durationMs, outcome.aborted);
-      tmuxTee?.finish(outcome.exitCode, outcome.durationMs);
+      await tmuxTee?.finish(outcome.exitCode, outcome.durationMs);
 
       if (outcome.errorKind || outcome.exitCode !== 0) {
         const errorText = outcome.stderr.trim() || outcome.stdout.trim() || `remote_read failed: exit=${outcome.exitCode ?? "unknown"}`;
@@ -2557,7 +2565,7 @@ export default function (pi: ExtensionAPI) {
         onSystem: (text) => live?.system(text),
       });
       live?.finish(outcome.exitCode, outcome.timedOut, outcome.durationMs, outcome.aborted);
-      tmuxTee?.finish(outcome.exitCode, outcome.durationMs);
+      await tmuxTee?.finish(outcome.exitCode, outcome.durationMs);
 
       const parsedResults = parseRemoteBatchResults(outcome, commands);
       const results = applyTotalBatchOutputLimit(parsedResults, totalOutputLimit);
