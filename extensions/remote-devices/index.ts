@@ -860,7 +860,7 @@ async function ensureRemoteTmuxSession(deviceId: string): Promise<string | null>
     const createResult = await runLocalProcess("tmux", [
       "new-session", "-d", "-s", name,
       "-x", "200", "-y", "50",
-      "cat",  // idle process — output-only receiver
+      "stty -echo; cat",  // idle process — output-only receiver, no tty echo
     ], 10_000);
     if (createResult.exitCode !== 0) {
       // Concurrent call may have created the session — re-check
@@ -879,6 +879,87 @@ async function ensureRemoteTmuxSession(deviceId: string): Promise<string | null>
   } catch {
     return null;
   }
+}
+
+let tmuxTeeCounter = 0;
+
+/**
+ * Write text to a remote-device tmux session pane.
+ * Uses `tmux load-buffer` + `tmux paste-buffer` for reliable handling of
+ * special characters. Falls back silently on any error.
+ */
+async function teeToRemoteTmux(sessionName: string, text: string): Promise<void> {
+  if (!text) return;
+  const teeId = `${process.pid}-${++tmuxTeeCounter}`;
+  const tmpFile = path.join(os.tmpdir(), `pi-remote-tee-${teeId}`);
+  const bufferName = `pi-tee-${teeId}`;
+  try {
+    fs.writeFileSync(tmpFile, text, "utf8");
+    const loadResult = await runLocalProcess("tmux", ["load-buffer", "-b", bufferName, tmpFile], 3000);
+    if (loadResult.exitCode === 0) {
+      await runLocalProcess("tmux", ["paste-buffer", "-b", bufferName, "-t", sessionName, "-d"], 3000);
+    }
+  } catch {
+    // Silent degradation — tmux tee is best-effort
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore cleanup errors */ }
+  }
+}
+
+/** Write a command start separator to the tmux session. */
+async function tmuxWriteSeparator(sessionName: string, toolName: string, commandSummary: string): Promise<void> {
+  const ts = new Date().toLocaleTimeString("en-GB", { hour12: false });
+  const line = `\n═══ [${toolName}] ${commandSummary} · ${ts} ═══\n`;
+  await teeToRemoteTmux(sessionName, line);
+}
+
+/** Write a command finish marker to the tmux session. */
+async function tmuxWriteFinish(sessionName: string, exitCode: number | null | undefined, durationMs: number | undefined): Promise<void> {
+  const code = exitCode ?? "?";
+  const dur = durationMs != null ? `${(durationMs / 1000).toFixed(1)}s` : "?";
+  const line = `\n─── exit=${code} · ${dur} ───\n`;
+  await teeToRemoteTmux(sessionName, line);
+}
+
+/** Helper: create a tmux tee context for a remote operation. Returns null if tmux unavailable. */
+async function createRemoteTmuxTee(deviceId: string, toolName: string, commandSummary: string): Promise<{
+  sessionName: string;
+  tee: (text: string) => void;
+  finish: (exitCode: number | null | undefined, durationMs: number | undefined) => Promise<void>;
+} | null> {
+  const sessionName = await ensureRemoteTmuxSession(deviceId);
+  if (!sessionName) return null;
+  await tmuxWriteSeparator(sessionName, toolName, commandSummary);
+  // Serialize all tmux writes to avoid race conditions
+  let writeChain: Promise<void> = Promise.resolve();
+  let pending = "";
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  const doFlush = () => {
+    if (pending) {
+      const text = pending;
+      pending = "";
+      writeChain = writeChain.then(() => teeToRemoteTmux(sessionName, text));
+    }
+    flushTimer = null;
+  };
+  return {
+    sessionName,
+    tee(text: string) {
+      pending += text;
+      if (!flushTimer) flushTimer = setTimeout(doFlush, 50);
+    },
+    async finish(exitCode, durationMs) {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      // Flush remaining output, then write finish marker, all serialized
+      const remaining = pending;
+      pending = "";
+      if (remaining) {
+        writeChain = writeChain.then(() => teeToRemoteTmux(sessionName, remaining));
+      }
+      writeChain = writeChain.then(() => tmuxWriteFinish(sessionName, exitCode, durationMs));
+      await writeChain;
+    },
+  };
 }
 
 async function ensureRemoteProbeBinary(): Promise<string> {
@@ -2243,6 +2324,7 @@ export default function (pi: ExtensionAPI) {
       const sudo = Boolean(params.sudo);
       const timeoutSeconds = params.timeout_seconds ?? 60;
       const live = startRemoteLiveTerminal(ctx, toolCallId, "remote_exec", device, user, params.command, params.cwd, sudo, timeoutSeconds);
+      const tmuxTee = await createRemoteTmuxTee(device.id, "remote_exec", params.command);
       const outcome = await runSsh(device, {
         user: params.user,
         command: params.command,
@@ -2252,10 +2334,11 @@ export default function (pi: ExtensionAPI) {
         allowDangerous: Boolean(params.allowDangerous),
         signal,
         onStart: ({ startedAt, totalTimeoutMs }) => live?.setTimeoutBudget(startedAt, totalTimeoutMs),
-        onOutput: (stream, text) => live?.append(stream, text),
+        onOutput: (stream, text) => { live?.append(stream, text); tmuxTee?.tee(text); },
         onSystem: (text) => live?.system(text),
       });
       live?.finish(outcome.exitCode, outcome.timedOut, outcome.durationMs, outcome.aborted);
+      await tmuxTee?.finish(outcome.exitCode, outcome.durationMs);
       return {
         content: [{ type: "text", text: formatExecContent(outcome) }],
         details: {
@@ -2307,6 +2390,7 @@ export default function (pi: ExtensionAPI) {
       const limit = Math.max(1, Math.min(REMOTE_READ_MAX_LINES, Math.floor(params.limit ?? REMOTE_READ_MAX_LINES)));
       const command = buildRemoteReadScript(params.path, offset, limit, REMOTE_READ_MAX_BYTES);
       const live = startRemoteLiveTerminal(ctx, toolCallId, "remote_read", device, user, `read ${params.path}`, undefined, sudo, timeoutSeconds);
+      const tmuxTee = await createRemoteTmuxTee(device.id, "remote_read", `read ${params.path}`);
       const outcome = await runSsh(device, {
         user: params.user,
         command,
@@ -2315,10 +2399,11 @@ export default function (pi: ExtensionAPI) {
         allowDangerous: true,
         signal,
         onStart: ({ startedAt, totalTimeoutMs }) => live?.setTimeoutBudget(startedAt, totalTimeoutMs),
-        onOutput: (stream, text) => live?.append(stream, text),
+        onOutput: (stream, text) => { live?.append(stream, text); tmuxTee?.tee(text); },
         onSystem: (text) => live?.system(text),
       });
       live?.finish(outcome.exitCode, outcome.timedOut, outcome.durationMs, outcome.aborted);
+      await tmuxTee?.finish(outcome.exitCode, outcome.durationMs);
 
       if (outcome.errorKind || outcome.exitCode !== 0) {
         const errorText = outcome.stderr.trim() || outcome.stdout.trim() || `remote_read failed: exit=${outcome.exitCode ?? "unknown"}`;
@@ -2465,6 +2550,8 @@ export default function (pi: ExtensionAPI) {
       const sudo = Boolean(params.sudo);
       const timeoutSeconds = params.timeout_seconds ?? 60;
       const live = startRemoteLiveTerminal(ctx, toolCallId, "remote_exec_batch", device, user, `${mode} batch: ${commands.map((item) => item.id).join(", ")}`, params.cwd, sudo, timeoutSeconds);
+      const batchSummary = `${mode} batch: ${commands.map((item) => item.id).join(", ")}`;
+      const tmuxTee = await createRemoteTmuxTee(device.id, "remote_exec_batch", batchSummary);
       const outcome = await runSsh(device, {
         user: params.user,
         command: batchScript,
@@ -2474,10 +2561,11 @@ export default function (pi: ExtensionAPI) {
         allowDangerous: true,
         signal,
         onStart: ({ startedAt, totalTimeoutMs }) => live?.setTimeoutBudget(startedAt, totalTimeoutMs),
-        onOutput: (stream, text) => live?.append(stream, stream === "stdout" ? stripBatchMarkerLines(text) : text),
+        onOutput: (stream, text) => { live?.append(stream, stream === "stdout" ? stripBatchMarkerLines(text) : text); tmuxTee?.tee(stream === "stdout" ? stripBatchMarkerLines(text) : text); },
         onSystem: (text) => live?.system(text),
       });
       live?.finish(outcome.exitCode, outcome.timedOut, outcome.durationMs, outcome.aborted);
+      await tmuxTee?.finish(outcome.exitCode, outcome.durationMs);
 
       const parsedResults = parseRemoteBatchResults(outcome, commands);
       const results = applyTotalBatchOutputLimit(parsedResults, totalOutputLimit);
