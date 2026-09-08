@@ -149,3 +149,15 @@ Remote operations can affect real machines.
 ## Current known devices
 
 The package does not bundle real devices. Use `remote_list_devices` for the authoritative current list from the user's runtime config.
+
+## Real-time output observation
+
+`remote_exec`, `remote_exec_batch` and `remote_read` automatically mirror output to a per-device tmux session `pi-remote-<device-id>` when tmux is available. Users can observe real-time command execution by running:
+
+```bash
+tmux attach -r -t pi-remote-<device-id>
+```
+
+- The `-r` flag makes the attach read-only — keyboard input is not forwarded to the pane.
+- Each tool invocation is bracketed by separator lines with tool name, command summary and timestamp.
+- If tmux is not installed or the session cannot be created, the feature silently degrades with no impact on tool behavior.
