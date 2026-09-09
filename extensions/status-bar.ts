@@ -645,18 +645,18 @@ function parseWorkflowCardCommand(args: unknown): WorkflowCardEvent | "clear" | 
   return { kind, title: title || head, detail, meta: visibleMeta, ttlMs };
 }
 
-export function updateTaskTimerFooter(snapshot: TimerSnapshot, ctx?: StatusPublisherContext): void {
+function setTimer(snapshot: TimerSnapshot): void {
   state.timer = {
     enabled: snapshot.enabled,
     elapsed: sanitizeInline(snapshot.elapsed),
     stage: sanitizeInline(snapshot.stage),
   };
-  publish(ctx);
+  publish();
 }
 
-export function clearTaskTimerFooter(ctx?: StatusPublisherContext): void {
+function clearTimer(): void {
   state.timer = undefined;
-  publish(ctx);
+  publish();
 }
 
 export function showOhMyPiStatusBar(ctx: ExtensionCommandContext): void {
@@ -720,6 +720,15 @@ export default function ohMyPiStatusBar(pi: ExtensionAPI): void {
 
   pi.events.on("oh-my-pi:step", (payload) => setStep((payload ?? {}) as StepEvent));
   pi.events.on("oh-my-pi:card", (payload) => setWorkflowCard((payload ?? {}) as WorkflowCardEvent));
+  // Cross-extension updates arrive here via the shared event bus. The loader gives
+  // every extension its own module instance (jiti moduleCache: false), so this must
+  // be the single owner of footer state: extensions must not import this module.
+  pi.events.on("oh-my-pi:timer", (payload) => setTimer((payload ?? {}) as TimerSnapshot));
+  pi.events.on("oh-my-pi:timer-clear", () => clearTimer());
+  pi.events.on("oh-my-pi:show-status", (payload) => {
+    const ctx = (payload as { ctx?: ExtensionCommandContext } | undefined)?.ctx;
+    if (ctx) showOhMyPiStatusBar(ctx);
+  });
 
   pi.on("thinking_level_select", (event, ctx) => {
     state.lastContext = ctx;
