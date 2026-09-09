@@ -11,10 +11,6 @@ import os
 import sys
 import traceback
 
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
-
 
 def error_out(category, message, detail=None):
     payload = {
@@ -28,6 +24,14 @@ def error_out(category, message, detail=None):
         payload["error"]["detail"] = detail
     print(json.dumps(payload, ensure_ascii=False))
     sys.exit(1)
+
+
+try:
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+except ImportError as exc:
+    error_out("dependency_error", f"openpyxl 依赖不可用: {exc}")
 
 
 def build_font(style):
@@ -119,19 +123,37 @@ def write_sheet(ws, sheet_spec):
 
 
 def generate(spec):
+    if not isinstance(spec, dict):
+        raise ValueError("invalid spec: 根节点必须是 JSON object")
+
     output_path = spec.get("output")
     if not output_path:
         raise ValueError("missing required field: output")
 
     sheets = spec.get("sheets")
-    if not sheets:
+    if not isinstance(sheets, list) or not sheets:
         raise ValueError("missing required field: sheets (must be non-empty list)")
+
+    for sheet_spec in sheets:
+        if not isinstance(sheet_spec, dict):
+            raise ValueError("invalid sheet spec: 每个 sheet 必须是 JSON object")
+        rows = sheet_spec.get("rows", [])
+        if not isinstance(rows, list) or any(not isinstance(row, list) for row in rows):
+            raise ValueError("invalid sheet spec: rows 必须是二维数组")
 
     wb = Workbook()
     wb.remove(wb.active)
 
+    used_names = [sheet_spec.get("name") for sheet_spec in sheets if sheet_spec.get("name")]
     for sheet_spec in sheets:
-        name = sheet_spec.get("name") or "Sheet"
+        name = sheet_spec.get("name")
+        if not name:
+            name = "Sheet"
+            suffix = 2
+            while name in used_names:
+                name = f"Sheet{suffix}"
+                suffix += 1
+            used_names.append(name)
         ws = wb.create_sheet(title=name)
         write_sheet(ws, sheet_spec)
 
