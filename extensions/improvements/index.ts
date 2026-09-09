@@ -46,8 +46,12 @@ function notifyError(ctx: ExtensionCommandContext, error: unknown): void {
 export async function runImprovementsCommand(args: string, ctx: ExtensionCommandContext, store = new ImprovementStore()): Promise<void> {
   const tokens = args.trim().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) {
-    const pending = store.list("pending");
-    ctx.ui.notify(pending.length === 0 ? "No pending improvement suggestions." : pending.map(summary).join("\n"), "info");
+    try {
+      const pending = store.list("pending");
+      ctx.ui.notify(pending.length === 0 ? "No pending improvement suggestions." : pending.map(summary).join("\n"), "info");
+    } catch (error) {
+      notifyError(ctx, error);
+    }
     return;
   }
 
