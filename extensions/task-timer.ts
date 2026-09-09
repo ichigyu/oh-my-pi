@@ -1,5 +1,12 @@
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { clearTaskTimerFooter, updateTaskTimerFooter } from "./status-bar";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+
+// Footer updates go through the shared event bus ("oh-my-pi:timer"), handled by the
+// status-bar extension. Do NOT import status-bar.ts here: the pi extension loader
+// creates one module instance per extension entry (jiti moduleCache: false), and a
+// second status-bar instance would install a competing footer whose state never
+// receives event updates (frozen TOKEN line).
+type EventsApi = { emit: (channel: string, data: unknown) => void };
+let events: EventsApi | undefined;
 
 type TimerPhase = "idle" | "running" | "paused";
 type Stage = "waiting" | "thinking" | "answering" | "tool" | "working" | "paused" | "idle";
@@ -12,10 +19,7 @@ type TimerState = {
   accumulatedMs: number;
   pausedReason?: string;
   currentTool?: string;
-  lastContext?: StatusContext;
 };
-
-type StatusContext = Pick<ExtensionContext, "hasUI" | "ui"> | Pick<ExtensionCommandContext, "hasUI" | "ui">;
 
 const TICK_MS = 1000;
 
@@ -60,34 +64,34 @@ function statusText(): string {
   return `oh-my-pi timer · ${formatDuration(elapsedMs())} · ${stageText()}`;
 }
 
-function publish(ctx: StatusContext | undefined = state.lastContext): void {
-  updateTaskTimerFooter({ enabled: state.enabled, elapsed: formatDuration(elapsedMs()), stage: stageText() }, ctx);
+function publish(): void {
+  events?.emit("oh-my-pi:timer", {
+    enabled: state.enabled,
+    elapsed: formatDuration(elapsedMs()),
+    stage: stageText(),
+  });
 }
 
-function remember(ctx: StatusContext): void {
-  state.lastContext = ctx;
-}
-
-function start(ctx?: StatusContext): void {
+function start(): void {
   state.phase = "running";
   state.stage = "working";
   state.startedAt = Date.now();
   state.accumulatedMs = 0;
   state.pausedReason = undefined;
   state.currentTool = undefined;
-  publish(ctx);
+  publish();
 }
 
-function resume(ctx?: StatusContext): void {
+function resume(): void {
   if (state.phase !== "paused") return;
   state.phase = "running";
   state.stage = "working";
   state.startedAt = Date.now();
   state.pausedReason = undefined;
-  publish(ctx);
+  publish();
 }
 
-function pause(reason: string, ctx?: StatusContext): void {
+function pause(reason: string): void {
   if (state.phase === "running") {
     state.accumulatedMs = elapsedMs();
     state.startedAt = undefined;
@@ -97,14 +101,14 @@ function pause(reason: string, ctx?: StatusContext): void {
     state.stage = "paused";
     state.pausedReason = reason;
   }
-  publish(ctx);
+  publish();
 }
 
-function setStage(stage: Stage, ctx?: StatusContext): void {
+function setStage(stage: Stage): void {
   if (state.phase === "idle") return;
-  if (state.phase === "paused") resume(ctx);
+  if (state.phase === "paused") resume();
   state.stage = stage;
-  publish(ctx);
+  publish();
 }
 
 function assistantEventStage(event: unknown): Stage | undefined {
@@ -131,10 +135,14 @@ export function showTaskTimer(ctx: ExtensionCommandContext): void {
 }
 
 export default function taskTimer(pi: ExtensionAPI): void {
+  events = pi.events;
+  pi.events.on("oh-my-pi:show-task-timer", (payload) => {
+    const ctx = (payload as { ctx?: ExtensionCommandContext } | undefined)?.ctx;
+    if (ctx) showTaskTimer(ctx);
+  });
   pi.registerCommand("task-timer", {
     description: "Show or toggle the oh-my-pi task timer",
     handler: async (args, ctx) => {
-      remember(ctx);
       const action = commandArgs(args).trim().toLowerCase();
       if (action === "off") state.enabled = false;
       else if (action === "on") state.enabled = true;
@@ -143,24 +151,22 @@ export default function taskTimer(pi: ExtensionAPI): void {
         if (ctx.hasUI) ctx.ui.notify("Usage: /task-timer [status|on|off|toggle]", "warning");
         return;
       }
-      publish(ctx);
+      publish();
       showTaskTimer(ctx);
     },
   });
 
-  pi.on("session_start", (_event, ctx) => {
-    remember(ctx);
-    publish(ctx);
+  pi.on("session_start", () => {
+    publish();
     if (tickTimer) clearInterval(tickTimer);
     tickTimer = setInterval(() => publish(), TICK_MS);
     (tickTimer as { unref?: () => void }).unref?.();
   });
 
-  pi.on("session_shutdown", (_event, ctx) => {
-    clearTaskTimerFooter(ctx);
+  pi.on("session_shutdown", () => {
+    events?.emit("oh-my-pi:timer-clear");
     if (tickTimer) clearInterval(tickTimer);
     tickTimer = undefined;
-    state.lastContext = undefined;
     state.phase = "idle";
     state.stage = "idle";
     state.accumulatedMs = 0;
@@ -168,43 +174,30 @@ export default function taskTimer(pi: ExtensionAPI): void {
     state.currentTool = undefined;
   });
 
-  pi.on("input", (_event, ctx) => {
-    remember(ctx);
-    start(ctx);
-  });
+  pi.on("input", () => start());
 
-  pi.on("before_agent_start", (_event, ctx) => {
-    remember(ctx);
-    setStage("waiting", ctx);
-  });
+  pi.on("before_agent_start", () => setStage("waiting"));
 
-  pi.on("before_provider_request", (_event, ctx) => {
-    remember(ctx);
-    setStage("waiting", ctx);
-  });
+  pi.on("before_provider_request", () => setStage("waiting"));
 
-  pi.on("message_update", (event, ctx) => {
-    remember(ctx);
+  pi.on("message_update", (event) => {
     const stage = assistantEventStage(event);
-    if (stage) setStage(stage, ctx);
+    if (stage) setStage(stage);
   });
 
-  pi.on("tool_execution_start", (event, ctx) => {
-    remember(ctx);
-    if (state.phase === "idle") start(ctx);
+  pi.on("tool_execution_start", (event) => {
+    if (state.phase === "idle") start();
     state.currentTool = toolName(event);
-    setStage("tool", ctx);
+    setStage("tool");
   });
 
-  pi.on("tool_execution_end", (_event, ctx) => {
-    remember(ctx);
+  pi.on("tool_execution_end", () => {
     state.currentTool = undefined;
-    setStage("working", ctx);
+    setStage("working");
   });
 
-  pi.on("agent_end", (_event, ctx) => {
-    remember(ctx);
+  pi.on("agent_end", () => {
     state.currentTool = undefined;
-    pause("waiting for user", ctx);
+    pause("waiting for user");
   });
 }

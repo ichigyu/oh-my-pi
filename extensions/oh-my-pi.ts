@@ -6,9 +6,11 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, SlashComm
 import { showTavilyPoolStatus, tavilyPoolStats } from "./tavily-tools";
 import { getMineruStatus } from "./mineru/config";
 import { runMineruCommand } from "./mineru";
-import { showOhMyPiStatusBar } from "./status-bar";
 import { getRtkStatus, showRtkAdapter } from "./rtk-adapter";
-import { showTaskTimer } from "./task-timer";
+// NOTE: do not import stateful footer modules (status-bar, task-timer) here.
+// The pi extension loader gives every extension its own module instance
+// (jiti moduleCache: false); importing them would create a second stateful
+// instance. Cross-extension calls go through the pi.events bus instead.
 import { parseSkillFrontmatter } from "./lib/skill-frontmatter.ts";
 import { checkUsageHealth } from "./usage/health.ts";
 import { getAppendSystemStatus } from "./append-system/status.ts";
@@ -752,10 +754,10 @@ async function runMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext, item: Men
       await showRemoteDevices(pi, ctx);
       break;
     case "Status bar":
-      showOhMyPiStatusBar(ctx);
+      pi.events.emit("oh-my-pi:show-status", { ctx });
       break;
     case "Task timer":
-      showTaskTimer(ctx);
+      pi.events.emit("oh-my-pi:show-task-timer", { ctx });
       break;
     case "Doctor":
       await runDoctor(pi, ctx);
