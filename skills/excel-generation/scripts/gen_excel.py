@@ -28,8 +28,11 @@ def error_out(category, message, detail=None):
 
 try:
     from openpyxl import Workbook, load_workbook
+    from openpyxl.chart import AreaChart, BarChart, LineChart, PieChart, Reference
+    from openpyxl.formatting.rule import CellIsRule, ColorScaleRule, FormulaRule
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
 except ImportError as exc:
     error_out("dependency_error", f"openpyxl 依赖不可用: {exc}")
 
@@ -97,6 +100,96 @@ def apply_style(cell, style):
         cell.number_format = style["number_format"]
 
 
+CHART_TYPES = {
+    "bar": BarChart,
+    "line": LineChart,
+    "pie": PieChart,
+    "area": AreaChart,
+}
+
+
+def parse_ref(ws, ref_spec):
+    return Reference(
+        ws,
+        min_col=ref_spec["min_col"],
+        min_row=ref_spec["min_row"],
+        max_col=ref_spec.get("max_col", ref_spec["min_col"]),
+        max_row=ref_spec.get("max_row", ref_spec["min_row"]),
+    )
+
+
+def add_chart(ws, chart_spec):
+    chart_type = chart_spec.get("type")
+    chart_cls = CHART_TYPES.get(chart_type)
+    if chart_cls is None:
+        raise ValueError(f"unsupported chart type: {chart_type} (支持 {list(CHART_TYPES)})")
+
+    chart = chart_cls()
+    if chart_spec.get("title"):
+        chart.title = chart_spec["title"]
+
+    data_spec = chart_spec.get("data")
+    if not data_spec:
+        raise ValueError("chart spec missing required field: data")
+    data_ref = parse_ref(ws, data_spec)
+    chart.add_data(data_ref, titles_from_data=bool(chart_spec.get("titles_from_data", True)))
+
+    categories_spec = chart_spec.get("categories")
+    if categories_spec:
+        chart.set_categories(parse_ref(ws, categories_spec))
+
+    anchor = chart_spec.get("anchor", "E2")
+    ws.add_chart(chart, anchor)
+
+
+def add_conditional_formatting(ws, rule_spec):
+    cell_range = rule_spec.get("range")
+    if not cell_range:
+        raise ValueError("conditional_formatting spec missing required field: range")
+
+    rule_type = rule_spec.get("type")
+    fill = build_fill(rule_spec) or PatternFill(
+        start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"
+    )
+
+    if rule_type == "color_scale":
+        colors = rule_spec.get("colors", ["F8696B", "FFEB84", "63BE7B"])
+        rule = ColorScaleRule(
+            start_type="min", start_color=colors[0],
+            mid_type="percentile", mid_value=50, mid_color=colors[1],
+            end_type="max", end_color=colors[2],
+        )
+    elif rule_type == "cell_is":
+        rule = CellIsRule(
+            operator=rule_spec.get("operator", "greaterThan"),
+            formula=rule_spec.get("formula", ["0"]),
+            fill=fill,
+        )
+    elif rule_type == "formula":
+        rule = FormulaRule(formula=rule_spec.get("formula", []), fill=fill)
+    else:
+        raise ValueError(f"unsupported conditional_formatting type: {rule_type}")
+
+    ws.conditional_formatting.add(cell_range, rule)
+
+
+def add_data_validation(ws, dv_spec):
+    cell_range = dv_spec.get("range")
+    if not cell_range:
+        raise ValueError("data_validation spec missing required field: range")
+
+    dv = DataValidation(
+        type=dv_spec.get("type", "list"),
+        formula1=dv_spec.get("formula1"),
+        allow_blank=bool(dv_spec.get("allow_blank", True)),
+    )
+    if dv_spec.get("error_message") or dv_spec.get("error_title"):
+        dv.error = dv_spec.get("error_message")
+        dv.errorTitle = dv_spec.get("error_title", "无效输入")
+    ws.add_data_validation(dv)
+    dv.add(cell_range)
+
+
 def write_sheet(ws, sheet_spec):
     rows = sheet_spec.get("rows", [])
     for row_idx, row in enumerate(rows, start=1):
@@ -121,6 +214,43 @@ def write_sheet(ws, sheet_spec):
     if sheet_spec.get("freeze_header"):
         ws.freeze_panes = "A2"
 
+    for chart_spec in sheet_spec.get("charts", []):
+        add_chart(ws, chart_spec)
+
+    for rule_spec in sheet_spec.get("conditional_formatting", []):
+        add_conditional_formatting(ws, rule_spec)
+
+    for dv_spec in sheet_spec.get("data_validations", []):
+        add_data_validation(ws, dv_spec)
+
+
+def fill_template(template_path, output_path, data):
+    if not os.path.isfile(template_path):
+        raise ValueError(f"template 文件不存在: {template_path}")
+
+    wb = load_workbook(template_path)
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.__class__.__name__ == "MergedCell":
+                    continue
+                if isinstance(cell.value, str) and "${" in cell.value:
+                    new_value = cell.value
+                    for key, val in data.items():
+                        new_value = new_value.replace("${" + key + "}", str(val))
+                    cell.value = new_value
+
+    wb.save(output_path)
+
+    if not os.path.isfile(output_path):
+        raise RuntimeError(f"保存后文件不存在: {output_path}")
+    try:
+        load_workbook(output_path)
+    except Exception as exc:
+        raise RuntimeError(f"保存后 openpyxl 无法读取生成的文件: {exc}")
+
+    return output_path
+
 
 def generate(spec):
     if not isinstance(spec, dict):
@@ -129,6 +259,13 @@ def generate(spec):
     output_path = spec.get("output")
     if not output_path:
         raise ValueError("missing required field: output")
+
+    template_path = spec.get("template")
+    if template_path:
+        data = spec.get("data")
+        if not isinstance(data, dict):
+            raise ValueError("missing required field: data (must be object) when template is set")
+        return fill_template(template_path, output_path, data)
 
     sheets = spec.get("sheets")
     if not isinstance(sheets, list) or not sheets:

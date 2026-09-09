@@ -1,0 +1,9 @@
+{
+  "template": "skills/excel-generation/examples/template_fill.xlsx",
+  "output": "template_fill_result.xlsx",
+  "data": {
+    "name": "张三",
+    "department": "研发部",
+    "salary": "15000"
+  }
+}
