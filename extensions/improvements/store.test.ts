@@ -60,6 +60,18 @@ test("lists suggestions and updates lifecycle state", () => {
   }
 });
 
+test("list skips malformed records while get reports the corruption", () => {
+  const root = fixture();
+  try {
+    const store = new ImprovementStore({ rootDir: root });
+    writeFileSync(path.join(root, "aaaaaaaaaaaaaaaa.json"), "not json");
+    assert.deepEqual(store.list(), []);
+    assert.throws(() => store.get("aaaaaaaaaaaaaaaa"), /Invalid improvement suggestion/);
+  } finally {
+    resetImprovementRoot(root);
+  }
+});
+
 test("does not create the state directory until a suggestion is saved", () => {
   const root = path.join(fixture(), "nested");
   const store = new ImprovementStore({ rootDir: root });

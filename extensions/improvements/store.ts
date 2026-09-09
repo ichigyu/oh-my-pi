@@ -142,8 +142,15 @@ export class ImprovementStore {
     if (!existsSync(this.rootDir)) return [];
     const suggestions = readdirSync(this.rootDir)
       .filter((name) => name.endsWith(".json"))
-      .map((name) => this.get(name.slice(0, -5)))
-      .filter((suggestion): suggestion is ImprovementSuggestion => suggestion !== undefined);
+      .map((name) => name.slice(0, -5))
+      .flatMap((id) => {
+        try {
+          const suggestion = this.get(id);
+          return suggestion ? [suggestion] : [];
+        } catch {
+          return [];
+        }
+      });
     return suggestions
       .filter((suggestion) => !state || suggestion.state === state)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
@@ -166,10 +173,15 @@ export class ImprovementStore {
     ensureRoot(this.rootDir);
     const target = filePath(this.rootDir, suggestion.id);
     const temporary = `${target}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(suggestion, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    chmodSync(temporary, 0o600);
-    renameSync(temporary, target);
-    chmodSync(target, 0o600);
+    try {
+      writeFileSync(temporary, `${JSON.stringify(suggestion, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      chmodSync(temporary, 0o600);
+      renameSync(temporary, target);
+      chmodSync(target, 0o600);
+    } catch (error) {
+      try { rmSync(temporary, { force: true }); } catch { /* preserve the original write error */ }
+      throw new Error(`Failed to persist improvement suggestion ${suggestion.id}: ${(error as Error).message}`);
+    }
   }
 }
 
