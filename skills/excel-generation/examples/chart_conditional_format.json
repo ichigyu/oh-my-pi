@@ -1,0 +1,48 @@
+{
+  "output": "chart_conditional_format.xlsx",
+  "sheets": [
+    {
+      "name": "Sales",
+      "freeze_header": true,
+      "columns": [
+        {"index": 1, "width": 12},
+        {"index": 2, "width": 12}
+      ],
+      "rows": [
+        [
+          {"value": "Month", "style": {"bold": true, "fill_color": "4472C4", "font_color": "FFFFFF"}},
+          {"value": "Sales", "style": {"bold": true, "fill_color": "4472C4", "font_color": "FFFFFF"}}
+        ],
+        ["Jan", 100],
+        ["Feb", 150],
+        ["Mar", 80],
+        ["Apr", 200]
+      ],
+      "charts": [
+        {
+          "type": "bar",
+          "title": "Monthly Sales",
+          "data": {"min_col": 2, "min_row": 1, "max_col": 2, "max_row": 5},
+          "categories": {"min_col": 1, "min_row": 2, "max_row": 5},
+          "anchor": "D2"
+        }
+      ],
+      "conditional_formatting": [
+        {
+          "range": "B2:B5",
+          "type": "cell_is",
+          "operator": "lessThan",
+          "formula": ["100"],
+          "fill_color": "FFC7CE"
+        }
+      ],
+      "data_validations": [
+        {
+          "range": "A2:A5",
+          "type": "list",
+          "formula1": "\"Jan,Feb,Mar,Apr\""
+        }
+      ]
+    }
+  ]
+}
