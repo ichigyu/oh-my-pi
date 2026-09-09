@@ -1,0 +1,24 @@
+{
+  "output": "basic_table.xlsx",
+  "sheets": [
+    {
+      "name": "Sheet1",
+      "freeze_header": true,
+      "columns": [
+        {"index": 1, "width": 15},
+        {"index": 2, "width": 15},
+        {"index": 3, "width": 15}
+      ],
+      "rows": [
+        [
+          {"value": "姓名", "style": {"bold": true, "fill_color": "4472C4", "font_color": "FFFFFF", "align": "center"}},
+          {"value": "部门", "style": {"bold": true, "fill_color": "4472C4", "font_color": "FFFFFF", "align": "center"}},
+          {"value": "工资", "style": {"bold": true, "fill_color": "4472C4", "font_color": "FFFFFF", "align": "center"}}
+        ],
+        ["张三", "研发", 15000],
+        ["李四", "销售", 12000],
+        ["王五", "运营", 13000]
+      ]
+    }
+  ]
+}

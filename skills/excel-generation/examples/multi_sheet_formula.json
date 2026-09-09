@@ -1,0 +1,33 @@
+{
+  "output": "multi_sheet_formula.xlsx",
+  "sheets": [
+    {
+      "name": "明细",
+      "freeze_header": true,
+      "columns": [
+        {"index": 1, "width": 15},
+        {"index": 2, "width": 12},
+        {"index": 3, "width": 12},
+        {"index": 4, "width": 12}
+      ],
+      "rows": [
+        [
+          {"value": "产品", "style": {"bold": true, "fill_color": "4472C4", "font_color": "FFFFFF"}},
+          {"value": "单价", "style": {"bold": true, "fill_color": "4472C4", "font_color": "FFFFFF"}},
+          {"value": "数量", "style": {"bold": true, "fill_color": "4472C4", "font_color": "FFFFFF"}},
+          {"value": "小计", "style": {"bold": true, "fill_color": "4472C4", "font_color": "FFFFFF"}}
+        ],
+        ["A", 10, 5, "=B2*C2"],
+        ["B", 20, 3, "=B3*C3"],
+        ["C", 15, 8, "=B4*C4"],
+        [{"value": "合计", "style": {"bold": true}}, "", "", "=SUM(D2:D4)"]
+      ]
+    },
+    {
+      "name": "汇总",
+      "rows": [
+        ["总计", "=明细!D5"]
+      ]
+    }
+  ]
+}
