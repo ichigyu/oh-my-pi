@@ -7,10 +7,11 @@ JSON 输入来自 stdin，或通过 --input <path> 传入文件。
 
 import argparse
 import json
+import os
 import sys
 import traceback
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -135,6 +136,14 @@ def generate(spec):
         write_sheet(ws, sheet_spec)
 
     wb.save(output_path)
+
+    if not os.path.isfile(output_path):
+        raise RuntimeError(f"保存后文件不存在: {output_path}")
+    try:
+        load_workbook(output_path)
+    except Exception as exc:
+        raise RuntimeError(f"保存后 openpyxl 无法读取生成的文件: {exc}")
+
     return output_path
 
 
