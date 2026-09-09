@@ -183,8 +183,8 @@ def add_data_validation(ws, dv_spec):
         formula1=dv_spec.get("formula1"),
         allow_blank=bool(dv_spec.get("allow_blank", True)),
     )
-    if dv_spec.get("error_message"):
-        dv.error = dv_spec["error_message"]
+    if dv_spec.get("error_message") or dv_spec.get("error_title"):
+        dv.error = dv_spec.get("error_message")
         dv.errorTitle = dv_spec.get("error_title", "无效输入")
     ws.add_data_validation(dv)
     dv.add(cell_range)
@@ -232,6 +232,8 @@ def fill_template(template_path, output_path, data):
     for ws in wb.worksheets:
         for row in ws.iter_rows():
             for cell in row:
+                if cell.__class__.__name__ == "MergedCell":
+                    continue
                 if isinstance(cell.value, str) and "${" in cell.value:
                     new_value = cell.value
                     for key, val in data.items():
