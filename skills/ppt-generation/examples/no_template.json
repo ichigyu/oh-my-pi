@@ -1,0 +1,26 @@
+{
+  "output": "no_template_result.pptx",
+  "slides": [
+    {
+      "layout_index": 0,
+      "placeholders": {
+        "Title 1": "季度总结报告",
+        "Subtitle 2": "2026 年第三季度"
+      }
+    },
+    {
+      "layout_index": 1,
+      "placeholders": {
+        "Title 1": "销售数据",
+        "Content Placeholder 2": "季度营收同比增长 18%，用户数突破 10 万。"
+      },
+      "charts": [
+        {
+          "type": "bar",
+          "categories": ["1月", "2月", "3月"],
+          "series": [{"name": "营收（万元）", "values": [100, 150, 130]}]
+        }
+      ]
+    }
+  ]
+}
