@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -60,6 +60,19 @@ test("lists suggestions and updates lifecycle state", () => {
   }
 });
 
+test("rejects records whose filename and embedded id differ", () => {
+  const root = fixture();
+  try {
+    const store = new ImprovementStore({ rootDir: root });
+    const saved = store.save(context());
+    const target = path.join(root, `${saved.id}.json`);
+    const renamed = path.join(root, "aaaaaaaaaaaaaaaa.json");
+    renameSync(target, renamed);
+    assert.throws(() => store.get("aaaaaaaaaaaaaaaa"), /id does not match filename/);
+  } finally {
+    resetImprovementRoot(root);
+  }
+});
 test("list skips malformed records while get reports the corruption", () => {
   const root = fixture();
   try {
@@ -71,6 +84,7 @@ test("list skips malformed records while get reports the corruption", () => {
     resetImprovementRoot(root);
   }
 });
+
 
 test("does not create the state directory until a suggestion is saved", () => {
   const root = path.join(fixture(), "nested");

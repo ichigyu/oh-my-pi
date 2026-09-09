@@ -135,6 +135,7 @@ export class ImprovementStore {
       throw new Error(`Invalid improvement suggestion ${id}: ${(error as Error).message}`);
     }
     if (!validateSuggestion(parsed)) throw new Error(`Invalid improvement suggestion ${id}: schema validation failed`);
+    if (parsed.id !== id) throw new Error(`Invalid improvement suggestion ${id}: id does not match filename`);
     return parsed;
   }
 
